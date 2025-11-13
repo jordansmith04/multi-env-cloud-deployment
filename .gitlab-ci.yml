@@ -1,0 +1,140 @@
+stages:
+  - build
+  - plan
+  - apply
+
+# Global variables
+variables:
+  TF_ROOT: terraform/environments
+  CI_PROD_BRANCH: "master"
+  # Assuming CI_DEFAULT_BRANCH is 'develop' or similar for non-prod
+
+  # Tfstate AWS S3 bucket 
+  AWS_STATE_BUCKET_KEY: ${CI_PROJECT_NAME}/tfstate
+  # ECR variables
+  ECR_REGISTRY: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+  ECR_REPOSITORY: ${CI_PROJECT_NAME}/app
+
+# Build Docker image
+build_image:
+  stage: build
+  image: docker:24.0.5-dind
+  services:
+    - docker:24.0.5-dind
+  tags: [docker] 
+  script:
+    - echo "--- Building Docker Image ---"
+    # Setup AWS CLI and login to ECR
+    - apk add --no-cache python3 py3-pip
+    - pip install awscli
+    - aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+    
+    # Build the image using the Dockerfile in src/
+    - docker build -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:${CI_COMMIT_SHORT_SHA} ./src
+    
+    # Push the image to ECR
+    - docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${CI_COMMIT_SHORT_SHA}
+  
+  # Runs automatically on commits
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# Common image and environment setup for all Terraform jobs
+.tf_base_config:
+  image: 
+    name: hashicorp/terraform:latest
+    entrypoint:
+      - /usr/bin/env
+      - "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  tags: [docker]
+  needs: ["build_image"]
+
+# Template for terraform plan jobs
+.tf_plan_template:
+  extends: .tf_base_config
+  stage: plan
+  script:
+    - echo "--- Initializing Terraform for ${CI_ENVIRONMENT_NAME} ---"
+    - terraform init -chdir=$TF_ROOT/$CI_ENVIRONMENT_NAME -backend-config="key=${AWS_STATE_BUCKET_KEY}/${CI_ENVIRONMENT_NAME}.tfstate"
+    - echo "--- Selecting/Creating Workspace: ${CI_ENVIRONMENT_NAME} ---"
+    - terraform workspace select ${CI_ENVIRONMENT_NAME} || terraform workspace new ${CI_ENVIRONMENT_NAME}
+    - echo "--- Running Terraform Plan ---"
+    - terraform plan -chdir=$TF_ROOT/$CI_ENVIRONMENT_NAME -var="app_image_tag=${CI_COMMIT_SHORT_SHA}" -out=tfplan.cache
+  artifacts:
+    paths:
+      - $TF_ROOT/$CI_ENVIRONMENT_NAME/tfplan.cache
+    expire_in: 1 hour
+
+# Template for terraform apply jobs
+.tf_apply_template:
+  extends: .tf_base_config
+  stage: apply
+  allow_failure: false 
+  script:
+    - echo "--- Applying Changes to ${CI_ENVIRONMENT_NAME} ---"
+    - terraform init -chdir=$TF_ROOT/$CI_ENVIRONMENT_NAME -backend-config="key=${AWS_STATE_BUCKET_KEY}/${CI_ENVIRONMENT_NAME}.tfstate"
+    - terraform workspace select ${CI_ENVIRONMENT_NAME}
+    - terraform apply -auto-approve -var="app_image_tag=${CI_COMMIT_SHORT_SHA}" tfplan.cache
+
+
+# DEV Environment
+# Automatically runs on commits
+dev_plan:
+  extends: .tf_plan_template
+  environment:
+    name: dev
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    CI_ENVIRONMENT_NAME: dev
+
+dev_apply:
+  extends: .tf_apply_template
+  environment:
+    name: dev
+    action: start
+  needs: ["dev_plan"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# Stage environment
+# Manual deployment required
+stage_plan:
+  extends: .tf_plan_template
+  environment:
+    name: stage
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    CI_ENVIRONMENT_NAME: stage
+
+stage_apply:
+  extends: .tf_apply_template
+  environment:
+    name: stage
+    action: start
+  needs: ["stage_plan"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual 
+
+# Prod environment
+# Manual deployment required when master branch
+prod_plan:
+  extends: .tf_plan_template
+  environment:
+    name: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_PROD_BRANCH
+  variables:
+    CI_ENVIRONMENT_NAME: production
+
+prod_apply:
+  extends: .tf_apply_template
+  environment:
+    name: production
+    action: start
+  needs: ["prod_plan"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_PROD_BRANCH
+      when: manual
