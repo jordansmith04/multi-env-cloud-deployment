@@ -1,7 +1,7 @@
 variable "env_budget_limit" {
   description = "The monthly budget limit for this environment"
   type        = number
-  default     = 150.00 # USD
+  default     = 500.00 # USD
 }
 
 variable "allowed_iam_account_id" {
@@ -13,13 +13,13 @@ variable "allowed_iam_account_id" {
 variable "env_fargate_cpu" {
   description = "Fargate CPU units"
   type        = number
-  default     = 512 # double dev env
+  default     = 1024 # double stage env
 }
 
 variable "env_fargate_memory" {
   description = "Fargate memory in MB"
   type        = number
-  default     = 1024 # double dev env
+  default     = 2048 # double stage env
 }
 
 variable "region" {
