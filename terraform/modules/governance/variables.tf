@@ -11,7 +11,7 @@ variable "budget_limit" {
 variable "notification_emails" {
   description = "Email addresses to send budget alerts to"
   type        = list(string)
-   default = ["example@gmail.com", "example2@gmail.com"]
+  default = ["example@gmail.com", "example2@gmail.com"]
 }
 
 variable "iam_access_name" {
